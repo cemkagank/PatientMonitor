@@ -1,6 +1,19 @@
 # Windows Development Startup Script
 # This script gets the local IP address, updates ip.ts, starts the server, and launches Expo
 
+# Initialize server process variable
+$script:serverProcess = $null
+
+# Cleanup function
+function Cleanup {
+    if ($script:serverProcess -and -not $script:serverProcess.HasExited) {
+        Write-Host "`nStopping server (PID: $($script:serverProcess.Id))..." -ForegroundColor Yellow
+        Stop-Process -Id $script:serverProcess.Id -Force -ErrorAction SilentlyContinue
+        Write-Host "Server stopped." -ForegroundColor Green
+    }
+}
+
+try {
 Write-Host "=== Patient Monitoring App - Development Startup ===" -ForegroundColor Cyan
 Write-Host ""
 
@@ -22,7 +35,12 @@ if ($adapters) {
     Write-Host "Network adapter: $adapterName" -ForegroundColor Gray
     
     # Check if connected to eduroam or similar public networks
-    $wifiProfile = netsh wlan show profiles | Select-String -Pattern "eduroam|public|guest" -CaseSensitive:$false
+    $wifiProfile = $null
+    try {
+        $wifiProfile = netsh wlan show profiles 2>$null | Select-String -Pattern "eduroam|public|guest" -CaseSensitive:$false
+    } catch {
+        # netsh command may fail, ignore
+    }
     if ($wifiProfile -or $adapterName -like "*eduroam*" -or $adapterName -like "*public*") {
         Write-Host ""
         Write-Host "⚠️  WARNING: Connected to a public/campus network (eduroam, etc.)" -ForegroundColor Yellow
@@ -50,11 +68,14 @@ Write-Host ""
 Write-Host "[2/4] Updating ip.ts file..." -ForegroundColor Yellow
 
 $ipTsPath = Join-Path $PSScriptRoot "ip.ts"
+# Build the file content - using string concatenation to avoid PowerShell backtick escaping issues
 $ipTsContent = "// Server IP Address Configuration`r`n"
 $ipTsContent += "// Update this value when the server IP changes`r`n"
 $ipTsContent += "export const SERVER_IP = `"$ipAddress`"; // YAREN BURAYI DEĞİŞTİRECEKSİN <----------`r`n"
 $ipTsContent += "export const SERVER_PORT = `"3000`";`r`n"
-$ipTsContent += "export const SERVER_URL = ``http://``$`{SERVER_IP}:``$`{SERVER_PORT}``;`r`n"
+# Template literal: backtick needs to be escaped in PowerShell (use double backtick)
+$templateStart = [char]96  # backtick character
+$ipTsContent += "export const SERVER_URL = $templateStart" + "http://`${SERVER_IP}:`${SERVER_PORT}$templateStart;`r`n"
 $ipTsContent += "`r`n"
 
 try {
@@ -76,21 +97,34 @@ if (-not (Test-Path $serverPath)) {
     exit 1
 }
 
+# Check if node is available
+$nodePath = Get-Command node -ErrorAction SilentlyContinue
+if (-not $nodePath) {
+    Write-Host "Error: Node.js not found. Please install Node.js and add it to PATH." -ForegroundColor Red
+    exit 1
+}
+
 # Start server in a new window
-$serverProcess = Start-Process -FilePath "node" -ArgumentList $serverPath -PassThru -WindowStyle Normal
-Write-Host "Server started (PID: $($serverProcess.Id))" -ForegroundColor Green
-Write-Host "Server running at: http://localhost:3000/data" -ForegroundColor Cyan
-Write-Host "Server accessible at: http://$ipAddress:3000/data" -ForegroundColor Cyan
-
-# Wait a bit for server to start
-Start-Sleep -Seconds 2
-
-# Check if server is actually running
 try {
-    $response = Invoke-WebRequest -Uri "http://localhost:3000/data" -TimeoutSec 2 -ErrorAction Stop
-    Write-Host "✓ Server is responding correctly" -ForegroundColor Green
+    $script:serverProcess = Start-Process -FilePath "node" -ArgumentList $serverPath -PassThru -WindowStyle Normal
+    Write-Host "Server started (PID: $($script:serverProcess.Id))" -ForegroundColor Green
+    Write-Host "Server running at: http://localhost:3000/data" -ForegroundColor Cyan
+    Write-Host "Server accessible at: http://$ipAddress:3000/data" -ForegroundColor Cyan
+    
+    # Wait a bit for server to start
+    Start-Sleep -Seconds 3
+    
+    # Check if server is actually running
+    try {
+        $null = Invoke-WebRequest -Uri "http://localhost:3000/data" -TimeoutSec 3 -ErrorAction Stop
+        Write-Host "Server is responding correctly" -ForegroundColor Green
+    } catch {
+        Write-Host "Warning: Server may not be responding yet. Check the server window." -ForegroundColor Yellow
+    }
 } catch {
-    Write-Host "⚠️  Warning: Server may not be responding. Check the server window." -ForegroundColor Yellow
+    Write-Host "Error starting server: $_" -ForegroundColor Red
+    Write-Host "Make sure Node.js is installed and server.js exists." -ForegroundColor Yellow
+    exit 1
 }
 
 # Step 4: Start Expo
@@ -101,16 +135,32 @@ Write-Host ""
 # Change to project directory
 Set-Location $PSScriptRoot
 
+# Check if npx is available
+$npxPath = Get-Command npx -ErrorAction SilentlyContinue
+if (-not $npxPath) {
+    Write-Host "Error: npx not found. Please install Node.js and npm." -ForegroundColor Red
+    Cleanup
+    exit 1
+}
+
 # Start Expo
 Write-Host "Starting Expo development server..." -ForegroundColor Cyan
 Write-Host "Press Ctrl+C to stop both server and Expo" -ForegroundColor Yellow
 Write-Host ""
 
-npx expo start
+try {
+    npx expo start
+} catch {
+    Write-Host "Error starting Expo: $_" -ForegroundColor Red
+    Cleanup
+    exit 1
+}
 
-# Cleanup: Kill server when script exits
-Write-Host ""
-Write-Host "Stopping server..." -ForegroundColor Yellow
-Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
+# Cleanup: Kill server when script exits normally
+Cleanup
 Write-Host "Done!" -ForegroundColor Green
+} finally {
+    # Ensure cleanup runs even if script is interrupted
+    Cleanup
+}
 
