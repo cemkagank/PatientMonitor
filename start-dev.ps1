@@ -106,24 +106,68 @@ if (-not $nodePath) {
 
 # Start server in a new window
 try {
-    $script:serverProcess = Start-Process -FilePath "node" -ArgumentList $serverPath -PassThru -WindowStyle Normal
+    $serverDir = Join-Path $PSScriptRoot "server"
+    
+    # Check if server has node_modules
+    $serverNodeModules = Join-Path $serverDir "node_modules"
+    if (-not (Test-Path $serverNodeModules)) {
+        Write-Host "Installing server dependencies..." -ForegroundColor Yellow
+        Push-Location $serverDir
+        npm install
+        Pop-Location
+    }
+    
+    # Start server with correct working directory
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = "node"
+    $startInfo.Arguments = "server.js"
+    $startInfo.WorkingDirectory = $serverDir
+    $startInfo.UseShellExecute = $true
+    $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal
+    
+    $script:serverProcess = [System.Diagnostics.Process]::Start($startInfo)
+    
+    if (-not $script:serverProcess) {
+        throw "Failed to start server process"
+    }
+    
     Write-Host "Server started (PID: $($script:serverProcess.Id))" -ForegroundColor Green
     Write-Host "Server running at: http://localhost:3000/data" -ForegroundColor Cyan
     Write-Host "Server accessible at: http://$ipAddress:3000/data" -ForegroundColor Cyan
+    Write-Host "Working directory: $serverDir" -ForegroundColor Gray
     
-    # Wait a bit for server to start
-    Start-Sleep -Seconds 3
+    # Wait a bit for server to start (longer wait for serial port initialization)
+    Write-Host "Waiting for server to initialize..." -ForegroundColor Yellow
+    Start-Sleep -Seconds 5
     
-    # Check if server is actually running
-    try {
-        $null = Invoke-WebRequest -Uri "http://localhost:3000/data" -TimeoutSec 3 -ErrorAction Stop
-        Write-Host "Server is responding correctly" -ForegroundColor Green
-    } catch {
-        Write-Host "Warning: Server may not be responding yet. Check the server window." -ForegroundColor Yellow
+    # Check if server is actually running (retry a few times)
+    $maxRetries = 5
+    $retryCount = 0
+    $serverResponding = $false
+    
+    while ($retryCount -lt $maxRetries -and -not $serverResponding) {
+        try {
+            $null = Invoke-WebRequest -Uri "http://localhost:3000/data" -TimeoutSec 2 -ErrorAction Stop
+            $serverResponding = $true
+            Write-Host "Server is responding correctly" -ForegroundColor Green
+        } catch {
+            $retryCount++
+            if ($retryCount -lt $maxRetries) {
+                Write-Host "Waiting for server... (attempt $retryCount/$maxRetries)" -ForegroundColor Yellow
+                Start-Sleep -Seconds 2
+            } else {
+                Write-Host "Warning: Server may not be responding. Check the server window for errors." -ForegroundColor Yellow
+                Write-Host "Common issues:" -ForegroundColor Yellow
+                Write-Host "  - Serial port (COM3) may not be available" -ForegroundColor White
+                Write-Host "  - Check if Arduino is connected" -ForegroundColor White
+                Write-Host "  - Server may still be starting..." -ForegroundColor White
+            }
+        }
     }
 } catch {
     Write-Host "Error starting server: $_" -ForegroundColor Red
     Write-Host "Make sure Node.js is installed and server.js exists." -ForegroundColor Yellow
+    Write-Host "Error details: $($_.Exception.Message)" -ForegroundColor Red
     exit 1
 }
 
